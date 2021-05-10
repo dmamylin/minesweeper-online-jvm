@@ -1,19 +1,21 @@
 package org.madbunny.minesweeper.server
 
 import io.ktor.application.*
+import io.ktor.http.*
 import io.ktor.http.cio.websocket.*
 import io.ktor.request.*
+import io.ktor.response.*
 import io.ktor.routing.*
 import io.ktor.websocket.*
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.time.withTimeoutOrNull
+import org.madbunny.minesweeper.core.json.JsonWrapper
 import org.madbunny.minesweeper.core.player_event.request.PlayerEvent
 import org.madbunny.minesweeper.core.register.request.RegisterRequest
-import org.madbunny.minesweeper.core.json.JsonWrapper
 import org.madbunny.minesweeper.core.register.response.RegisterFail
 import org.madbunny.minesweeper.core.register.response.RegisterFailStatusCode
-import org.madbunny.minesweeper.server.internal.RequestParser
 import org.madbunny.minesweeper.server.internal.PlayerController
+import org.madbunny.minesweeper.server.internal.RequestParser
 import java.time.Duration
 
 class Server private constructor (
@@ -60,32 +62,16 @@ class Server private constructor (
             }
 
             routing {
-                webSocket("/ping") {
-                    onRequest(this) {
-                        send("pong")
-                    }
+                get("/ping") {
+                    call.respondText("pong")
                 }
 
-                webSocket("/register") {
-                    onRequest(this) {
-                        val frame = withTimeoutOrNull(registerTimeout) {
-                            incoming.receive()
-                        }
-
-                        if (frame != null) {
-                            when (val parsedRequest = requestParser.parseRegisterRequest(frame)) {
-                                !is RegisterRequest -> send(json.toJson(parsedRequest))
-                                else -> {
-                                    val registerResult = playerController.onRegister(parsedRequest)
-                                    send(json.toJson(registerResult))
-                                }
-                            }
-                        } else {
-                            val fail = RegisterFail("Didn't receive any data",
-                                RegisterFailStatusCode.REQUEST_TIMEOUT)
-                            send(json.toJson(fail))
-                        }
+                post("/register") {
+                    val registerResult = when (val parsedRequest = requestParser.parseRegisterRequest(call.receiveText())) {
+                        !is RegisterRequest -> parsedRequest
+                        else -> playerController.onRegister(parsedRequest)
                     }
+                    call.respondText(json.toJson(registerResult), ContentType.Application.Json)
                 }
 
                 webSocket("/play") {

@@ -2,8 +2,10 @@ package org.madbunny.minesweeper.client
 
 import io.ktor.client.*
 import io.ktor.client.features.websocket.*
+import io.ktor.client.request.*
 import io.ktor.http.*
 import io.ktor.http.cio.websocket.*
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.runBlocking
@@ -25,13 +27,12 @@ import java.time.Duration
 class Client private constructor(
     private val host: String,
     private val port: Int,
-    private val registerTimeout: Duration,
 ) {
     private companion object {
         const val DEFAULT_HOST = "0.0.0.0"
         const val DEFAULT_PORT = 8080
-        val DEFAULT_PING_TIMEOUT: Duration = Duration.ofSeconds(1)
-        val DEFAULT_REGISTER_TIMEOUT: Duration = Duration.ofSeconds(15)
+        val DEFAULT_PING_TIMEOUT: Duration = Duration.ofSeconds(30)
+        val DEFAULT_REGISTER_TIMEOUT: Duration = Duration.ofMinutes(1)
 
         val LOGGER: Logger = LoggerFactory.getLogger(Client::class.java.simpleName)
     }
@@ -39,16 +40,13 @@ class Client private constructor(
     class Builder {
         private var host = DEFAULT_HOST
         private var port = DEFAULT_PORT
-        private var registerTimeout = DEFAULT_REGISTER_TIMEOUT
 
         fun setHost(value: String): Builder { host = value; return this }
         fun setPort(value: Int): Builder { port = value; return this }
-        fun setRegisterTimeout(value: Duration): Builder { registerTimeout = value; return this }
 
         fun build() = Client(
             host,
             port,
-            registerTimeout,
         )
     }
 
@@ -62,16 +60,14 @@ class Client private constructor(
     }
 
     fun ping(timeout: Duration = DEFAULT_PING_TIMEOUT): Boolean {
-        var pingOk = false
+        var pingOk: Boolean
         try {
             runBlocking {
                 withContext(Dispatchers.IO) {
-                    client.webSocket(HttpMethod.Get, host, port, "/ping") {
-                        val frame = waitForFrame(this, timeout)
-                        if (frame is Frame.Text) {
-                            pingOk = frame.readText() == "pong"
-                        }
+                    val response = waitForResponse(timeout) {
+                        client.get<String>("http", host, port, "/ping")
                     }
+                    pingOk = response == "pong"
                 }
             }
         } catch (e: Exception) {
@@ -83,26 +79,26 @@ class Client private constructor(
     @Throws(
         ServerTimedOutException::class,
         ServerIncorrectResponseFormatException::class,
-        ServerClosedConnectionException::class,
     )
-    fun register(playerName: String): RegisterResult {
+    fun register(playerName: String, timeout: Duration = DEFAULT_REGISTER_TIMEOUT): RegisterResult {
         LOGGER.debug("Trying to register a new player: $playerName")
         return try {
             runBlocking {
                 withContext(Dispatchers.IO) {
-                    var result: RegisterResult? = null
-                    client.webSocket(HttpMethod.Get, host, port, "/register") {
-                        send(registerRequest(playerName))
-                        val frame = waitForFrame(this, registerTimeout)
-                        val text = frame as? Frame.Text
-                            ?: throw ServerIncorrectResponseFormatException("Expected a textual response")
-                        result = asObject(text)
+                    val request = RegisterRequest(playerName)
+                    val response = waitForResponse(timeout) {
+                        client.post<String>("http", host, port, "/register", body = json.toJson(request))
                     }
-                    result ?: throw ServerIncorrectResponseFormatException("Empty reply from the server")
+
+                    response.ifEmpty {
+                        throw ServerIncorrectResponseFormatException("Empty reply from the server")
+                    }
+
+                    asObject(response)
                 }
             }
-        } catch (e: ClosedReceiveChannelException) {
-            throw ServerClosedConnectionException(e.message)
+        } catch (e: Exception) {
+            throw ServerIncorrectResponseFormatException("An unknown error occurred: ${e.message}")
         }
     }
 
@@ -118,6 +114,11 @@ class Client private constructor(
     }
 
     @Throws(ServerTimedOutException::class)
+    private suspend fun <T> waitForResponse(timeout: Duration, worker: suspend CoroutineScope.() -> T): T {
+        return withTimeoutOrNull(timeout, worker) ?: throw ServerTimedOutException(timeout)
+    }
+
+    @Throws(ServerTimedOutException::class)
     private suspend fun waitForFrame(session: DefaultClientWebSocketSession, timeout: Duration): Frame {
         val maybeFrame = withTimeoutOrNull(timeout) {
             session.incoming.receive()
@@ -126,9 +127,9 @@ class Client private constructor(
     }
 
     @Throws(ServerIncorrectResponseFormatException::class)
-    private inline fun <reified T : Any> asObject(text: Frame.Text): T {
+    private inline fun <reified T : Any> asObject(text: String): T {
         try {
-            return json.fromJson(text.readText(), T::class.java)
+            return json.fromJson(text, T::class.java)
         } catch (e: Exception) {
             throw ServerIncorrectResponseFormatException("Cannot parse the response due to error: ${e.message}")
         }

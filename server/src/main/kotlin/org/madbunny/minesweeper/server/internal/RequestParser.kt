@@ -20,8 +20,13 @@ internal class RequestParser(private val json: JsonWrapper) {
     fun parseRegisterRequest(frame: Frame): Any {
         val text = frame as? Frame.Text ?: return RegisterFail("Unknown input type, expected: Text",
             RegisterFailStatusCode.INCORRECT_REQUEST_FORMAT)
+        return parseRegisterRequest(text.readText())
+    }
+
+    // Returns: RegisterFail or RegisterRequest
+    fun parseRegisterRequest(text: String): Any {
         return try {
-            json.fromJson(text.readText(), RegisterRequest::class.java)
+            json.fromJson(text, RegisterRequest::class.java)
         } catch (e: Exception) {
             LOGGER.error("An error occurred while parsing a register request: ${e.message}")
             RegisterFail("Unknown format of a register request",
